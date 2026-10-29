@@ -45,7 +45,8 @@ def monkey_patch_put_event_into_queue(monkeypatch):
 
 
 def _test_build_package(
-    tmp_path_str, *, symlink_install, setup_cfg, libexec_pattern, data_files
+    tmp_path_str, *, symlink_install, setup_cfg, libexec_pattern, data_files,
+    python_shebang=None,
 ):
     assert not libexec_pattern or setup_cfg, \
         'The libexec pattern requires use of setup.cfg'
@@ -89,6 +90,7 @@ def _test_build_package(
                 build_base=str(tmp_path / 'build'),
                 install_base=str(tmp_path / 'install'),
                 symlink_install=symlink_install,
+                python_shebang=python_shebang,
             ),
             dependencies={}
         )
@@ -172,6 +174,13 @@ def _test_build_package(
         assert data_files == any(install_base.rglob(
             'share/test_package/test-resource'))
 
+        if python_shebang:
+            script, = (
+                path for path in install_base.rglob('my_command')
+                if path.is_file())
+            assert script.read_bytes().startswith(
+                b'#!' + python_shebang.encode() + b'\n')
+
         if not symlink_install:
             pkg_info, = install_base.rglob('PKG-INFO')
             assert 'Name: test-package' in pkg_info.read_text().splitlines()
@@ -201,3 +210,18 @@ def test_build_package(
     _test_build_package(
         tmp_path_str, symlink_install=not symlink_first, setup_cfg=setup_cfg,
         libexec_pattern=libexec_pattern, data_files=data_files)
+
+
+@pytest.mark.parametrize(
+    'setup_cfg,libexec_pattern',
+    [(False, False), (True, False), (True, True)])
+@pytest.mark.parametrize(
+    'symlink_install',
+    [False, True])
+def test_build_package_python_shebang(
+    symlink_install, setup_cfg, libexec_pattern, tmp_path,
+):
+    _test_build_package(
+        str(tmp_path), symlink_install=symlink_install, setup_cfg=setup_cfg,
+        libexec_pattern=libexec_pattern, data_files=False,
+        python_shebang='/usr/bin/env python3')

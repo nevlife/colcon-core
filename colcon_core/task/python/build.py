@@ -35,7 +35,7 @@ _PYTHON_CMD = [
 ]
 
 
-def _get_install_scripts(path):
+def _get_setup_cfg_option(path, section, option):
     setup_cfg_path = os.path.join(path, 'setup.cfg')
     if not os.path.exists(setup_cfg_path):
         return
@@ -43,11 +43,46 @@ def _get_install_scripts(path):
     parser.optionxform = str
     with open(setup_cfg_path, encoding='utf-8') as f:
         parser.read_file(f)
-    install_script = parser.get('install', 'install-scripts', fallback=None)
-    if install_script is None:
-        install_script = parser.get(
-            'install', 'install_scripts', fallback=None)
-    return install_script
+    value = parser.get(section, option, fallback=None)
+    if value is None:
+        value = parser.get(
+            section, option.replace('-', '_'), fallback=None)
+    return value
+
+
+def _get_install_scripts(path):
+    return _get_setup_cfg_option(path, 'install', 'install-scripts')
+
+
+def _rewrite_shebangs(args, interpreter):
+    """
+    Point the scripts written with the build interpreter to another one.
+
+    setuptools writes the interpreter running colcon into the scripts, and
+    `setup.py develop` offers no option to change it, so scripts built from
+    within a virtual environment still run the system interpreter.
+    """
+    old = b'#!' + os.path.normpath(sys.executable).encode() + b'\n'
+    new = b'#!' + interpreter.encode() + b'\n'
+    script_dirs = {Path(args.install_base) / 'bin'}
+    for section, option in (
+        ('install', 'install-scripts'), ('develop', 'script-dir'),
+    ):
+        script_dir = _get_setup_cfg_option(args.path, section, option)
+        if script_dir:
+            script_dirs.add(
+                Path(script_dir.replace('$base', args.install_base)))
+    for script_dir in script_dirs:
+        if not script_dir.is_dir():
+            continue
+        for script in script_dir.iterdir():
+            if script.is_symlink() or not script.is_file():
+                continue
+            with script.open('rb') as f:
+                if f.readline() != old:
+                    continue
+                rest = f.read()
+            script.write_bytes(new + rest)
 
 
 class PythonBuildTask(TaskExtensionPoint):
@@ -56,6 +91,15 @@ class PythonBuildTask(TaskExtensionPoint):
     def __init__(self):  # noqa: D107
         super().__init__()
         satisfies_version(TaskExtensionPoint.EXTENSION_POINT_VERSION, '^1.0')
+
+    def add_arguments(self, *, parser):  # noqa: D102
+        parser.add_argument(
+            '--python-shebang',
+            metavar='INTERPRETER',
+            help='Interpreter line for the scripts of Python packages in '
+                 'place of the one running colcon, e.g. '
+                 "'/usr/bin/env python3' to run them with the python3 of "
+                 'the active virtual environment')
 
     async def build(self, *, additional_hooks=None):  # noqa: D102
         pkg = self.context.pkg
@@ -206,6 +250,10 @@ class PythonBuildTask(TaskExtensionPoint):
             additional_hooks += create_environment_hook(
                 'pythonpath_develop', Path(base_path), pkg.name, 'PYTHONPATH',
                 base_path, mode='prepend')
+
+        python_shebang = getattr(args, 'python_shebang', None)
+        if python_shebang:
+            _rewrite_shebangs(args, python_shebang)
 
         hooks = create_environment_hooks(args.install_base, pkg.name)
         create_environment_scripts(
